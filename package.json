@@ -2,6 +2,7 @@
   "name": "point-tracker",
   "version": "1.0.0",
   "main": "index.ts",
+  "homepage": "https://mgalo1231.github.io/point-tracker",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
@@ -27,6 +28,7 @@
   "devDependencies": {
     "@types/react": "~19.1.0",
     "gh-pages": "^6.3.0",
+    "netlify-cli": "^23.11.1",
     "typescript": "~5.9.2"
   },
   "private": true

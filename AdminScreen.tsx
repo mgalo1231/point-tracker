@@ -13,6 +13,21 @@ type QuickAction = {
   is_active: boolean;
 };
 
+type Exchange = {
+  id: string;
+  user_id: string;
+  reward_id: string;
+  reward_name: string;
+  points_cost: number;
+  status: 'pending' | 'approved' | 'rejected';
+  admin_note: string | null;
+  created_at: string;
+  profiles?: {
+    nickname: string | null;
+    email: string;
+  };
+};
+
 export default function AdminScreen() {
   const { user } = useAuth();
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -29,10 +44,15 @@ export default function AdminScreen() {
   const [taskLabel, setTaskLabel] = useState('');
   const [taskPoints, setTaskPoints] = useState('');
   const [taskEmoji, setTaskEmoji] = useState('⚠️');
+  
+  // 兑换审批相关
+  const [pendingExchanges, setPendingExchanges] = useState<Exchange[]>([]);
+  const [processingId, setProcessingId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchUsers();
     fetchQuickActions();
+    fetchPendingExchanges();
   }, []);
 
   const fetchUsers = async () => {
@@ -64,6 +84,106 @@ export default function AdminScreen() {
       if (usersWithPoints.length > 0 && !selectedUserId) {
         setSelectedUserId(usersWithPoints[0].id);
       }
+    }
+  };
+
+  const fetchPendingExchanges = async () => {
+    console.log('获取待审批兑换...');
+    const { data, error } = await supabase
+      .from('exchanges')
+      .select(`
+        *,
+        profiles:user_id (nickname, email)
+      `)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('获取待审批兑换错误:', error);
+      return;
+    }
+
+    console.log('待审批兑换:', data);
+    setPendingExchanges(data || []);
+  };
+
+  const handleApproveExchange = async (exchange: Exchange) => {
+    console.log('批准兑换:', exchange);
+    setProcessingId(exchange.id);
+    
+    try {
+      // 1. 扣除用户积分
+      const { error: historyError } = await supabase
+        .from('points_history')
+        .insert({
+          user_id: exchange.user_id,
+          amount: -exchange.points_cost,
+          reason: `兑换：${exchange.reward_name}（管理员批准）`,
+          created_by: user?.id,
+        });
+
+      if (historyError) {
+        console.error('插入积分历史错误:', historyError);
+        throw historyError;
+      }
+
+      console.log('积分已扣除，更新兑换状态...');
+
+      // 2. 更新兑换状态
+      const { error: updateError } = await supabase
+        .from('exchanges')
+        .update({
+          status: 'approved',
+          approved_by: user?.id,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', exchange.id);
+
+      if (updateError) {
+        console.error('更新兑换状态错误:', updateError);
+        throw updateError;
+      }
+
+      console.log('兑换已批准，刷新数据...');
+      alert('✅ 已批准兑换申请！用户积分已扣除');
+      await fetchPendingExchanges();
+      await fetchUsers(); // 刷新用户积分
+    } catch (err: any) {
+      console.error('批准兑换失败:', err);
+      alert(`批准失败: ${err.message}`);
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  const handleRejectExchange = async (exchange: Exchange, note: string = '') => {
+    console.log('拒绝兑换:', exchange, '理由:', note);
+    setProcessingId(exchange.id);
+    
+    try {
+      const { error } = await supabase
+        .from('exchanges')
+        .update({
+          status: 'rejected',
+          admin_note: note || '管理员拒绝了此兑换申请',
+          approved_by: user?.id,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', exchange.id);
+
+      if (error) {
+        console.error('更新兑换状态错误:', error);
+        throw error;
+      }
+
+      console.log('兑换已拒绝，刷新数据...');
+      alert('❌ 已拒绝兑换申请');
+      await fetchPendingExchanges();
+    } catch (err: any) {
+      console.error('拒绝兑换失败:', err);
+      alert(`拒绝失败: ${err.message}`);
+    } finally {
+      setProcessingId(null);
     }
   };
 
@@ -254,6 +374,63 @@ export default function AdminScreen() {
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <Title style={styles.headerTitle}>⚠️ 扣分管理</Title>
+
+        {/* 待审批兑换 */}
+        {pendingExchanges.length > 0 && (
+          <Card style={styles.card}>
+            <Card.Content>
+              <Text style={styles.sectionTitle}>🎁 待审批兑换 ({pendingExchanges.length})</Text>
+              {pendingExchanges.map((exchange) => (
+                <View key={exchange.id} style={styles.exchangeCard}>
+                  <View style={styles.exchangeInfo}>
+                    <Text style={styles.exchangeUser}>
+                      用户：{exchange.profiles?.nickname || exchange.profiles?.email || '未知用户'}
+                    </Text>
+                    <Text style={styles.exchangeReward}>
+                      🎁 申请兑换：{exchange.reward_name}
+                    </Text>
+                    <Text style={styles.exchangePoints}>
+                      💰 所需积分：{exchange.points_cost} 分
+                    </Text>
+                    <Text style={styles.exchangeTime}>
+                      🕐 申请时间：{new Date(exchange.created_at).toLocaleString('zh-CN')}
+                    </Text>
+                  </View>
+                  <View style={styles.exchangeActions}>
+                    <Button
+                      mode="contained"
+                      onPress={() => {
+                        if (window.confirm(`确定批准用户兑换"${exchange.reward_name}"吗？\n将扣除 ${exchange.points_cost} 积分`)) {
+                          handleApproveExchange(exchange);
+                        }
+                      }}
+                      disabled={processingId === exchange.id}
+                      loading={processingId === exchange.id}
+                      style={[styles.actionBtn, { backgroundColor: '#4CAF50' }]}
+                      compact
+                    >
+                      ✅ 批准
+                    </Button>
+                    <Button
+                      mode="outlined"
+                      onPress={() => {
+                        const note = window.prompt('请输入拒绝理由（可选）:');
+                        if (note !== null) {
+                          handleRejectExchange(exchange, note || '管理员拒绝了此申请');
+                        }
+                      }}
+                      disabled={processingId === exchange.id}
+                      style={styles.actionBtn}
+                      compact
+                    >
+                      ❌ 拒绝
+                    </Button>
+                  </View>
+                </View>
+              ))}
+            </Card.Content>
+          </Card>
+        )}
 
         {/* 选择成员 */}
         <Card style={styles.card}>
@@ -592,5 +769,43 @@ const styles = StyleSheet.create({
   dialogInput: {
     marginBottom: 12,
     backgroundColor: 'white',
+  },
+  exchangeCard: {
+    backgroundColor: '#FFF9E6',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#FFD54F',
+  },
+  exchangeInfo: {
+    marginBottom: 12,
+  },
+  exchangeUser: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 4,
+  },
+  exchangeReward: {
+    fontSize: 15,
+    color: '#FF6B9D',
+    marginBottom: 4,
+  },
+  exchangePoints: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 2,
+  },
+  exchangeTime: {
+    fontSize: 12,
+    color: '#999',
+  },
+  exchangeActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  actionBtn: {
+    flex: 1,
   },
 });

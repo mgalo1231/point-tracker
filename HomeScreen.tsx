@@ -50,6 +50,18 @@ type QuickAction = {
   is_active: boolean;
 };
 
+type Exchange = {
+  id: string;
+  user_id: string;
+  reward_id: string;
+  reward_name: string;
+  points_cost: number;
+  status: 'pending' | 'approved' | 'rejected';
+  admin_note: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 function buildDailyStats(history: HistoryItem[]) {
   const days: { label: string; key: string; total: number; gain: number }[] = [];
   const now = new Date();
@@ -89,8 +101,9 @@ export default function HomeScreen() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [rewards, setRewards] = useState<Reward[]>([]);
+  const [exchanges, setExchanges] = useState<Exchange[]>([]);
   const [redeemingId, setRedeemingId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'store' | 'history'>('store');
+  const [activeTab, setActiveTab] = useState<'store' | 'history' | 'exchanges'>('store');
   const [chartMode, setChartMode] = useState<'net' | 'gain'>('net');
   const { width } = useWindowDimensions();
   const isWide = width >= 900;
@@ -167,10 +180,30 @@ export default function HomeScreen() {
     setRefreshing(false);
   };
 
+  const fetchExchanges = async () => {
+    if (!user) return;
+    
+    console.log('获取用户兑换记录...');
+    const { data, error } = await supabase
+      .from('exchanges')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('获取兑换记录错误:', error);
+      return;
+    }
+    
+    console.log('用户兑换记录:', data);
+    setExchanges(data || []);
+  };
+
   useEffect(() => {
     fetchHistory();
     fetchRewards();
     fetchQuickActions();
+    fetchExchanges();
   }, [user]);
 
   const handleEditReward = (reward: Reward) => {
@@ -333,25 +366,36 @@ export default function HomeScreen() {
   };
 
   const handleDeleteAction = async (id: string) => {
-    Alert.alert('确认删除', '确定要删除这个任务吗？', [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '删除',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const { error } = await supabase
-              .from('quick_actions')
-              .delete()
-              .eq('id', id);
-            if (error) throw error;
-            fetchQuickActions();
-          } catch (err: any) {
-            Alert.alert('删除失败', err.message);
-          }
-        },
-      },
-    ]);
+    if (!window.confirm('确定要删除这个任务吗？')) return;
+    
+    try {
+      console.log('=== 开始删除任务 ===');
+      console.log('任务 ID:', id);
+      console.log('当前用户:', user?.id);
+      console.log('是否管理员:', isAdmin);
+      
+      const { data, error } = await supabase
+        .from('quick_actions')
+        .delete()
+        .eq('id', id)
+        .select();
+      
+      console.log('删除响应 data:', data);
+      console.log('删除响应 error:', error);
+      
+      if (error) {
+        console.error('❌ 删除失败:', error);
+        alert(`删除失败: ${error.message}\n错误代码: ${error.code}`);
+        return;
+      }
+      
+      console.log('✅ 删除成功');
+      alert('删除成功');
+      await fetchQuickActions();
+    } catch (err: any) {
+      console.error('❌ 捕获到异常:', err);
+      alert(`删除失败: ${err.message}`);
+    }
   };
 
   const currentPoints = profile?.points ?? 0;
@@ -360,14 +404,21 @@ export default function HomeScreen() {
 
   const handleRedeem = async (reward: Reward) => {
     if (!user) {
-      Alert.alert('提示', '请先登录');
+      alert('提示：请先登录');
       return;
     }
 
     if (currentPoints < reward.points_required) {
-      Alert.alert('积分不足', '当前积分不够兑换这个奖励');
+      alert(`积分不足！当前有 ${currentPoints} 分，需要 ${reward.points_required} 分`);
       return;
     }
+    
+    // 确认兑换
+    const confirmMsg = reward.requires_approval 
+      ? `确定申请兑换"${reward.name}"吗？\n所需积分：${reward.points_required} 分\n（需要管理员批准）`
+      : `确定兑换"${reward.name}"吗？\n将立即扣除 ${reward.points_required} 积分`;
+    
+    if (!window.confirm(confirmMsg)) return;
 
     setRedeemingId(reward.id);
 
@@ -379,13 +430,19 @@ export default function HomeScreen() {
           .insert({
             user_id: user.id,
             reward_id: reward.id,
-            points_spent: reward.points_required,
+            reward_name: reward.name,
+            points_cost: reward.points_required,
             status: 'pending',
           });
 
-        if (exchangeError) throw exchangeError;
+        if (exchangeError) {
+          console.error('插入兑换申请错误:', exchangeError);
+          throw exchangeError;
+        }
 
-        Alert.alert('已提交申请', '等待管理员批准');
+        console.log('兑换申请已创建，刷新数据...');
+        await fetchExchanges(); // 立即刷新兑换列表
+        alert('✅ 已提交申请！请在"我的兑换"标签查看申请状态，等待管理员批准');
       } else {
         // 小奖励：直接扣分并记录历史
         const { error: historyError } = await supabase
@@ -404,18 +461,19 @@ export default function HomeScreen() {
           .insert({
             user_id: user.id,
             reward_id: reward.id,
-            points_spent: reward.points_required,
-            status: 'completed',
+            reward_name: reward.name,
+            points_cost: reward.points_required,
+            status: 'approved',
           });
 
         if (exchangeError) throw exchangeError;
 
-        Alert.alert('兑换成功', `已成功兑换：${reward.name}`);
+        alert(`🎉 兑换成功！已使用 ${reward.points_required} 分兑换 ${reward.name}`);
         await Promise.all([refreshProfile(), fetchHistory()]);
       }
     } catch (error: any) {
-      console.error('Redeem error:', error);
-      Alert.alert('兑换失败', error.message || '请稍后再试');
+      console.error('兑换错误:', error);
+      alert(`兑换失败: ${error.message || '请稍后再试'}`);
     } finally {
       setRedeemingId(null);
     }
@@ -456,11 +514,7 @@ export default function HomeScreen() {
   const todaySelfRecords = todayRecords.filter((h) =>
     h.reason.startsWith('自我加分：'),
   );
-  const todaySelfMaxCount = 5;
   const todaySelfCount = todaySelfRecords.length;
-  const todaySelfReasons = new Set(
-    todaySelfRecords.map((h) => h.reason.replace('自我加分：', '')),
-  );
 
   const formatHistoryTitle = (item: HistoryItem): string => {
     const { amount, reason } = item;
@@ -528,10 +582,11 @@ export default function HomeScreen() {
                 label="Emoji (可选)"
                 value={actionEmoji}
                 onChangeText={setActionEmoji}
-                maxLength={2}
+                maxLength={4}
                 style={{ backgroundColor: 'white' }}
                 mode="outlined"
                 placeholder="🎉"
+                selectTextOnFocus
               />
             </Dialog.Content>
             <Dialog.Actions>
@@ -728,30 +783,14 @@ export default function HomeScreen() {
                       {editMode ? '🛠 管理加分任务' : '✅ 今天完成了什么？点一下就加分'}
                     </Text>
                   </View>
-                  
-                  {(!editMode && todaySelfCount >= todaySelfMaxCount) && (
-                    <Text style={styles.selfTasksHint}>
-                      今日自我加分已达上限（{todaySelfMaxCount} 次）
-                    </Text>
-                  )}
-                  
+
                   <View style={styles.selfTasksGrid}>
                     {quickActions.map((action) => (
                       <View key={action.id} style={styles.selfTaskWrapper}>
                         <TouchableOpacity
-                          style={[
-                            styles.selfTaskButton,
-                            !editMode && (todaySelfReasons.has(action.label) || todaySelfCount >= todaySelfMaxCount) && styles.selfTaskButtonDisabled,
-                          ]}
+                          style={styles.selfTaskButton}
                           onPress={async () => {
                             if (editMode) return; // 编辑模式下点击本身无反应，靠右上角按钮
-                            
-                            if (
-                              todaySelfReasons.has(action.label) ||
-                              todaySelfCount >= todaySelfMaxCount
-                            ) {
-                              return;
-                            }
                             if (!user) return;
 
                             try {
@@ -790,9 +829,7 @@ export default function HomeScreen() {
                             {action.emoji || '🎉'}
                           </Text>
                           <Text style={styles.selfTaskLabel}>
-                            {!editMode && todaySelfReasons.has(action.label)
-                              ? `${action.label} · 今日已完成`
-                              : action.label}
+                            {action.label}
                           </Text>
                           <Text style={styles.selfTaskPoints}>
                             +{action.points}
@@ -893,6 +930,20 @@ export default function HomeScreen() {
                 ]}
               >
                 📋 积分记录
+              </Button>
+              <Button
+                mode={activeTab === 'exchanges' ? 'contained' : 'text'}
+                onPress={() => setActiveTab('exchanges')}
+                style={[
+                  styles.tabButton,
+                  activeTab === 'exchanges' && styles.tabButtonActive,
+                ]}
+                labelStyle={[
+                  styles.tabLabel,
+                  activeTab === 'exchanges' && styles.tabLabelActive,
+                ]}
+              >
+                🎁 我的兑换
               </Button>
             </View>
 
@@ -1016,6 +1067,63 @@ export default function HomeScreen() {
                             </Text>
                           )}
                         />
+                        <Divider />
+                      </React.Fragment>
+                    ))
+                  )}
+                </View>
+              </View>
+            )}
+
+            {/* 我的兑换标签 */}
+            {activeTab === 'exchanges' && (
+              <View style={styles.historySection}>
+                <Title style={styles.sectionTitle}>🎁 我的兑换记录</Title>
+                <View style={styles.historyContainer}>
+                  {exchanges.length === 0 ? (
+                    <Text style={styles.emptyText}>
+                      还没有兑换记录哦～
+                    </Text>
+                  ) : (
+                    exchanges.map((exchange) => (
+                      <React.Fragment key={exchange.id}>
+                        <List.Item
+                          title={exchange.reward_name}
+                          titleStyle={styles.historyTitle}
+                          description={`${exchange.points_cost} 分 · ${new Date(exchange.created_at).toLocaleDateString()}`}
+                          descriptionStyle={styles.historyTime}
+                          left={() => (
+                            <View style={styles.historyIcon}>
+                              <Text style={styles.historyEmoji}>
+                                {exchange.status === 'pending' ? '⏳' : exchange.status === 'approved' ? '✅' : '❌'}
+                              </Text>
+                            </View>
+                          )}
+                          right={() => (
+                            <Chip
+                              compact
+                              style={{
+                                backgroundColor: 
+                                  exchange.status === 'pending' ? '#FFF9E6' :
+                                  exchange.status === 'approved' ? '#E8F5E9' : '#FFEBEE'
+                              }}
+                              textStyle={{
+                                color:
+                                  exchange.status === 'pending' ? '#F57C00' :
+                                  exchange.status === 'approved' ? '#4CAF50' : '#F44336',
+                                fontSize: 12
+                              }}
+                            >
+                              {exchange.status === 'pending' ? '待审批' : 
+                               exchange.status === 'approved' ? '已批准' : '已拒绝'}
+                            </Chip>
+                          )}
+                        />
+                        {exchange.admin_note && (
+                          <Text style={{ paddingLeft: 72, paddingRight: 16, paddingBottom: 8, color: '#666', fontSize: 13 }}>
+                            管理员备注：{exchange.admin_note}
+                          </Text>
+                        )}
                         <Divider />
                       </React.Fragment>
                     ))
